@@ -1,0 +1,38 @@
+rule seismic_alert:
+if magnitude > 6 then earthquake_detected
+
+rule tsunami_risk:
+if earthquake_detected AND coastal_distance < 50 then tsunami_warning
+
+rule coastal_evacuation:
+if tsunami_warning AND population > 500 then evacuate_coastal
+
+rule air_support:
+if evacuate_coastal AND road_blocked > 0 then request_helicopter
+
+rule flood_alert:
+if rainfall > 100 AND river_level > 8 then flood_risk
+
+rule dam_critical:
+if flood_risk AND dam_capacity < 20 then dam_failure_risk
+
+rule emergency_broadcast:
+if dam_failure_risk then national_emergency
+
+rule shelter_activation:
+if flood_risk then activate_shelters
+
+rule multiple_hazard:
+if earthquake_detected AND flood_risk then catastrophic_event
+
+rule volcanic_alert:
+if ash_level > 50 then volcanic_activity
+
+State:
+magnitude = 7
+coastal_distance = 30
+population = 1200
+road_blocked = 1
+rainfall = 130
+river_level = 9
+dam_capacity = 15
