@@ -22,8 +22,17 @@ if dam_failure_risk then national_emergency
 rule shelter_activation:
 if flood_risk then activate_shelters
 
+rule shelter_activation_b:
+if flood_risk then activate_shelters
+
 rule multiple_hazard:
 if earthquake_detected AND flood_risk then catastrophic_event
+
+rule seismic_emergency:
+if earthquake_detected then critical_alert
+
+rule flood_emergency:
+if flood_risk then critical_alert
 
 rule volcanic_alert:
 if ash_level > 50 then volcanic_activity

@@ -1,0 +1,6 @@
+rule r1:
+if temp > 30 AND humidity < 50 then alert
+
+State:
+temp = 35
+humidity = 40

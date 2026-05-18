@@ -1,0 +1,3 @@
+State:
+temp = 35
+humidity = 60

@@ -1,0 +1,5 @@
+rule r1:
+if temp > 30 then alert
+
+State:
+temp = 20

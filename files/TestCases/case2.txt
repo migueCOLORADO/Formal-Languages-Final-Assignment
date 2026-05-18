@@ -1,0 +1,8 @@
+rule r1:
+if temp > 30 then alert
+
+rule r2:
+if alert then fan_on
+
+State:
+temp = 35

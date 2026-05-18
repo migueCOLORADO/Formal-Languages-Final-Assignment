@@ -1,0 +1,9 @@
+rule r1:
+if temp > 30 then fan_on
+
+rule r2:
+if humidity < 50 then fan_on
+
+State:
+temp = 35
+humidity = 40

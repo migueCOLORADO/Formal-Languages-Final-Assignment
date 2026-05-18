@@ -1,30 +1,27 @@
 // ================================================================
-//  DisasterGuard
-//  Sistema de Detección y Respuesta ante Desastres Naturales
+//  DisasterGuard — Natural Disaster Detection Rule-Based Language
 //
-//  Implementación de un lenguaje de reglas basado en hechos con:
-//    - Análisis léxico
-//    - Análisis sintáctico LL(1) por descenso recursivo
-//    - Construcción de AST
-//    - Intérprete con modelo de punto fijo
-//    - Análisis estático (conflictos, redundancias, reglas inactivas)
+//  Full compiler pipeline for a rule-based language:
+//    - Lexical analysis   : text -> token stream
+//    - Syntactic analysis : LL(1) recursive descent -> AST
+//    - Interpreter        : fixed-point evaluation of rules
+//    - Static analysis    : conflicts, redundancies, inactive rules
 //
-//  Gramática LL(1) utilizada:
-//    Program  → RuleList
-//    RuleList → Rule RuleList | ε
-//    Rule     → rule id : if Cond then Action
-//    Cond     → Atom Cond'
-//    Cond'    → AND Atom Cond' | ε
-//    Atom     → id Atom'
-//    Atom'    → RelOp value | ε
-//    RelOp    → > | < | =
-//    Action   → id
+//  LL(1) grammar (left recursion eliminated from original spec):
+//    Program  -> RuleList
+//    RuleList -> Rule RuleList | e
+//    Rule     -> rule id : if Cond then Action
+//    Cond     -> Atom Cond'
+//    Cond'    -> AND Atom Cond' | e
+//    Atom     -> id Atom'
+//    Atom'    -> RelOp value | e
+//    RelOp    -> > | < | =
+//    Action   -> id
 //
-//  Uso: ./disasterguard <archivo.txt>
-//       ./disasterguard < <archivo.txt>
+//  Usage: ./disasterguard <file.txt>
+//         ./disasterguard          (stdin; end with Ctrl+Z on Windows)
 // ================================================================
 
-// Importamos Librerias
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -42,25 +39,32 @@ using namespace std;
 
 
 // ================================================================
-// MÓDULO 1: TOKENS
-// Unidades mínimas de significado producidas por el léxico.
+// MODULE 1 — TOKENS
+//
+// A token is the minimal meaningful unit produced by the lexer.
+// Every token stores:
+//   type   — grammatical category (which production can consume it)
+//   lexeme — original text (preserved for IDs, values, and errors)
+//   line   — 1-based source line for human-readable error messages
 // ================================================================
 
 enum class TokenType {
-    RULE,         // palabra clave "rule"
-    IF,           // palabra clave "if"
-    THEN,         // palabra clave "then"
-    AND,          // operador "AND"
-    COLON,        // puntuación ":"
-    GT,           // operador relacional ">"
-    LT,           // operador relacional "<"
-    EQ,           // operador relacional "="
-    ID,           // identificador: [a-z][a-z0-9_]*
-    VALUE,        // entero literal: [0-9]+
-    END_OF_FILE   // fin de entrada
+    RULE,         // keyword  "rule"
+    IF,           // keyword  "if"
+    THEN,         // keyword  "then"
+    AND,          // keyword  "AND"  (uppercase, case-sensitive)
+    COLON,        // punctuation ":"
+    GT,           // relational operator ">"
+    LT,           // relational operator "<"
+    EQ,           // relational operator "="
+    ID,           // identifier  [a-z_][a-z0-9_]*
+    VALUE,        // integer literal  [0-9]+
+    END_OF_FILE   // sentinel — signals clean end of the token stream
 };
 
-// Convierte un tipo de token a string legible (para mensajes de error)
+// Human-readable label for a token type.
+// Used only inside syntax error messages so users see "'rule'"
+// instead of the internal enum value.
 string tokenName(TokenType t) {
     switch (t) {
         case TokenType::RULE:        return "'rule'";
@@ -71,17 +75,17 @@ string tokenName(TokenType t) {
         case TokenType::GT:          return "'>'";
         case TokenType::LT:          return "'<'";
         case TokenType::EQ:          return "'='";
-        case TokenType::ID:          return "identificador";
-        case TokenType::VALUE:       return "valor entero";
-        case TokenType::END_OF_FILE: return "fin de archivo";
-        default:                     return "desconocido";
+        case TokenType::ID:          return "identifier";
+        case TokenType::VALUE:       return "integer value";
+        case TokenType::END_OF_FILE: return "end of file";
+        default:                     return "unknown";
     }
 }
 
 struct Token {
     TokenType type;
-    string    lexeme;  // texto original del token
-    int       line;    // línea de origen (para mensajes de error)
+    string    lexeme;  // exact text from source (e.g. "magnitude", "30")
+    int       line;    // 1-based source line
 
     Token(TokenType t, string lex, int ln)
         : type(t), lexeme(move(lex)), line(ln) {}
@@ -89,21 +93,27 @@ struct Token {
 
 
 // ================================================================
-// MÓDULO 2: ANALIZADOR LÉXICO
+// MODULE 2 — LEXICAL ANALYZER (LEXER)
 //
-// Transforma la cadena de texto de las reglas en una lista de
-// tokens. Ignora espacios en blanco. Distingue palabras clave de
-// identificadores. "State" y otras palabras en mayúscula no usadas
-// se descartan aquí; el separador "State:" se maneja antes de
-// llamar al lexer.
+// Scans the rules section character by character and produces a
+// flat token list. Strategy: longest-match.
+//   1. Skip whitespace; count newlines for line tracking
+//   2. Recognize single-character punctuation and operators
+//   3. Read digit runs as integer literals
+//   4. Read lowercase word runs, then classify as keyword or ID
+//   5. Read uppercase word runs; emit AND, discard everything else
+//
+// "State:" and other uppercase words are stripped from the input
+// before the lexer is called; they are silently discarded here too
+// as a safety measure.
 // ================================================================
 
 class Lexer {
-    string src;
-    size_t pos  = 0;
-    int    line = 1;
+    string src;       // complete rules-section text
+    size_t pos  = 0;  // current read index
+    int    line = 1;  // current line number
 
-    // Avanza el cursor sobre espacios y saltos de línea
+    // Advance past whitespace, incrementing 'line' on each newline
     void skipWhitespace() {
         while (pos < src.size() && isspace((unsigned char)src[pos])) {
             if (src[pos] == '\n') ++line;
@@ -114,6 +124,7 @@ class Lexer {
 public:
     explicit Lexer(string source) : src(move(source)) {}
 
+    // Scan and return the full token list (always ends with END_OF_FILE)
     vector<Token> tokenize() {
         vector<Token> tokens;
 
@@ -121,35 +132,38 @@ public:
             skipWhitespace();
             if (pos >= src.size()) break;
 
-            int  ln = line;
+            int  ln = line;   // snapshot line before consuming anything
             char c  = src[pos];
 
-            // ── Puntuación y operadores de un carácter ──────────────
+            // ── Single-character operators / punctuation ─────────
             if (c == ':') { tokens.emplace_back(TokenType::COLON, ":", ln); ++pos; continue; }
             if (c == '>') { tokens.emplace_back(TokenType::GT,    ">", ln); ++pos; continue; }
             if (c == '<') { tokens.emplace_back(TokenType::LT,    "<", ln); ++pos; continue; }
             if (c == '=') { tokens.emplace_back(TokenType::EQ,    "=", ln); ++pos; continue; }
 
-            // ── Literales enteros ────────────────────────────────────
+            // ── Integer literals: [0-9]+ ─────────────────────────
             if (isdigit((unsigned char)c)) {
                 string num;
+                // Consume all consecutive digits (longest match)
                 while (pos < src.size() && isdigit((unsigned char)src[pos]))
                     num += src[pos++];
                 tokens.emplace_back(TokenType::VALUE, num, ln);
                 continue;
             }
 
-            // ── Identificadores en minúscula y palabras clave ────────
-            // Restricción: identificadores empiezan con letra minúscula o '_'
+            // ── Identifiers and keywords: [a-z_][a-z0-9_]* ──────
             if (islower((unsigned char)c) || c == '_') {
                 string id;
+                // Consume all valid identifier characters (longest match).
+                // Reading the full word before classifying prevents
+                // "ruling" from being tokenized as RULE + ID("ing").
                 while (pos < src.size() &&
                        (islower((unsigned char)src[pos]) ||
                         isdigit((unsigned char)src[pos]) ||
                         src[pos] == '_'))
                     id += src[pos++];
 
-                // Clasificar como palabra clave o identificador
+                // Keywords take priority; anything else becomes an ID
                 if      (id == "rule") tokens.emplace_back(TokenType::RULE, id, ln);
                 else if (id == "if")   tokens.emplace_back(TokenType::IF,   id, ln);
                 else if (id == "then") tokens.emplace_back(TokenType::THEN, id, ln);
@@ -157,22 +171,22 @@ public:
                 continue;
             }
 
-            // ── Palabras en mayúscula (AND, State, etc.) ─────────────
+            // ── Uppercase words: only AND is a valid token ───────
             if (isupper((unsigned char)c)) {
                 string word;
                 while (pos < src.size() && isalpha((unsigned char)src[pos]))
                     word += src[pos++];
-                // Solo AND es un token válido en las reglas
+                // "State" and any other uppercase word that is not AND
+                // is silently discarded (handled before tokenization)
                 if (word == "AND")
                     tokens.emplace_back(TokenType::AND, word, ln);
-                // "State" y otras se ignoran (se manejan como separador de sección)
                 continue;
             }
 
-            // Carácter no reconocido — saltamos
-            ++pos;
+            ++pos;  // unrecognized character — skip silently
         }
 
+        // EOF sentinel guarantees the parser always has a clean end
         tokens.emplace_back(TokenType::END_OF_FILE, "", line);
         return tokens;
     }
@@ -180,147 +194,162 @@ public:
 
 
 // ================================================================
-// MÓDULO 3: AST — Árbol de Sintaxis Abstracta
+// MODULE 3 — ABSTRACT SYNTAX TREE (AST)
 //
-// Jerarquía de nodos:
-//   ASTNode (base)
-//     ├── FactNode      → condición de hecho activo: id
-//     ├── CmpNode       → condición de comparación: id op value
-//     ├── AndNode       → conjunción: cond AND cond
-//     └── RuleNode      → regla completa: nombre, condición, acción
+// In-memory representation of the program after parsing.
+// Retains only semantic content; discards keywords and punctuation.
 //
-// ProgramNode no hereda de ASTNode por simplicidad; contiene la
-// lista de RuleNode.
+// Node types:
+//   FactNode — condition: id is an active fact
+//   CmpNode  — condition: vars[id] op value
+//   AndNode  — condition: left AND right (both must hold)
+//   RuleNode — a complete rule: name, condition subtree, action
+//
+// NodePtr = shared_ptr<ASTNode>: reference-counted ownership.
+// The virtual destructor on ASTNode is mandatory so that deleting
+// a base pointer calls the correct derived destructor, preventing
+// memory leaks when nodes are freed.
 // ================================================================
 
 struct ASTNode { virtual ~ASTNode() = default; };
-using  NodePtr = shared_ptr<ASTNode>;
 
-// Condición: hecho activo — verdadera si 'id' está en el conjunto de hechos
+// Universal handle for any AST node (reference-counted)
+using NodePtr = shared_ptr<ASTNode>;
+
+// Condition: true when 'id' is in State::facts
 struct FactNode : ASTNode {
     string id;
     explicit FactNode(string id) : id(move(id)) {}
 };
 
-// Condición: comparación — verdadera si vars[id] op value
+// Condition: true when vars[id] op value holds
 struct CmpNode : ASTNode {
-    string id;   // variable a comparar
-    string op;   // ">", "<" o "="
-    int    value; // valor literal
+    string id;     // variable name looked up in State::vars
+    string op;     // ">", "<", or "="
+    int    value;  // integer literal from source
 
     CmpNode(string id, string op, int v)
         : id(move(id)), op(move(op)), value(v) {}
 };
 
-// Condición: conjunción — verdadera si left Y right son verdaderas
+// Condition: true when BOTH children are true.
+// Always built left-associatively: a AND b AND c => And(And(a,b), c)
 struct AndNode : ASTNode {
     NodePtr left, right;
     AndNode(NodePtr l, NodePtr r) : left(move(l)), right(move(r)) {}
 };
 
-// Regla completa
+// A complete rule as parsed from the source
 struct RuleNode : ASTNode {
-    string  name;    // identificador de la regla
-    NodePtr cond;    // árbol de condición
-    string  action;  // hecho a activar
+    string  name;    // rule identifier (e.g. "seismic_alert")
+    NodePtr cond;    // root of the condition subtree
+    string  action;  // fact to activate when condition is true
 
     RuleNode(string n, NodePtr c, string a)
         : name(move(n)), cond(move(c)), action(move(a)) {}
 };
 
-// Programa: lista ordenada de reglas
+// Top-level container: ordered list of rules
 struct ProgramNode {
     vector<shared_ptr<RuleNode>> rules;
 };
 
 
 // ================================================================
-// MÓDULO 4: PARSER LL(1) — DESCENSO RECURSIVO
+// MODULE 4 — LL(1) SYNTACTIC ANALYZER (RECURSIVE DESCENT PARSER)
 //
-// Cada función parseX() implementa directamente la producción X
-// de la gramática LL(1). No se usa tabla explícita; la selección
-// de producción se hace con el símbolo actual (lookahead de 1).
+// One private method per grammar production. The correct production
+// is selected by inspecting the current lookahead token (cur())
+// against FIRST and FOLLOW sets — no explicit parsing table needed.
 //
-// PRIMERO y SIGUIENTE relevantes:
-//   PRIMERO(RuleList) = {rule, ε}
-//   PRIMERO(Cond)     = {id}
-//   PRIMERO(Cond')    = {AND, ε}
-//   PRIMERO(Atom')    = {>, <, =, ε}
-//   SIGUIENTE(Cond')  = {then}
-//   SIGUIENTE(Atom')  = {AND, then}
+// Why LL(1) and not the original grammar?
+//   The spec grammar contains Cond -> Cond AND Cond (left recursion).
+//   Exercise 4.16 (Aho et al.) proves no left-recursive grammar is LL(1).
+//   The substitution Cond -> Atom Cond' / Cond' -> AND Atom Cond' | e
+//   eliminates it while preserving the language.
+//
+// FIRST / FOLLOW sets that guide production choices:
+//   FIRST(Rule)   = {rule}       FIRST(Cond)  = {id}
+//   FIRST(Cond')  = {AND, e}     FIRST(Atom') = {>, <, =, e}
+//   FOLLOW(Cond') = {then}       FOLLOW(Atom')= {AND, then}
 // ================================================================
 
 class Parser {
-    vector<Token> toks;
-    size_t pos = 0;
+    vector<Token> toks;  // token stream from the lexer
+    size_t pos = 0;      // index of the current lookahead token
 
-    // ── Utilidades de navegación ─────────────────────────────────
+    // ── Navigation helpers ────────────────────────────────────────
 
+    // Peek at the current token without consuming it (1-token lookahead)
     Token& cur() { return toks[pos]; }
 
+    // Return and consume the current token
     Token consume() { return toks[pos++]; }
 
-    // Consume el token actual si es del tipo esperado; lanza error si no
+    // Consume if the type matches; throw a descriptive error otherwise.
+    // This is the primary point where syntax errors are raised.
     Token expect(TokenType t) {
         if (cur().type != t)
             throw runtime_error(
-                "Error sintáctico en línea " + to_string(cur().line) +
-                ": se esperaba " + tokenName(t) +
-                " pero se encontró '" + cur().lexeme + "'");
+                "Syntax error at line " + to_string(cur().line) +
+                ": expected " + tokenName(t) +
+                " but found '" + cur().lexeme + "'");
         return consume();
     }
 
-    // ── Funciones de parsing ─────────────────────────────────────
+    // ── Productions (one method = one non-terminal) ───────────────
 
-    // Program → RuleList
+    // Program -> RuleList EOF
     ProgramNode parseProgram() {
         ProgramNode prog;
-        // RuleList → Rule RuleList | ε
-        // PRIMERO(Rule) = {rule} → mientras veamos 'rule', parsear regla
+        // RuleList -> Rule RuleList | e
+        // Loop while lookahead is in FIRST(Rule) = {rule}
         while (cur().type == TokenType::RULE)
             prog.rules.push_back(parseRule());
-        expect(TokenType::END_OF_FILE);
+        expect(TokenType::END_OF_FILE);  // verify the input ends cleanly
         return prog;
     }
 
-    // Rule → rule id : if Cond then Action
+    // Rule -> rule id : if Cond then Action
     shared_ptr<RuleNode> parseRule() {
         expect(TokenType::RULE);
-        string name = expect(TokenType::ID).lexeme;
+        string name = expect(TokenType::ID).lexeme;   // rule identifier
         expect(TokenType::COLON);
         expect(TokenType::IF);
-        NodePtr cond = parseCond();
+        NodePtr cond = parseCond();                    // build condition subtree
         expect(TokenType::THEN);
-        string action = expect(TokenType::ID).lexeme;
+        string action = expect(TokenType::ID).lexeme;  // action identifier
         return make_shared<RuleNode>(name, cond, action);
     }
 
-    // Cond → Atom Cond'
+    // Cond -> Atom Cond'
     NodePtr parseCond() {
         NodePtr left = parseAtom();
-        return parseCondPrime(left);
+        return parseCondPrime(left);  // pass left for Cond' to wrap in AndNode
     }
 
-    // Cond' → AND Atom Cond' | ε
-    // Se construye left-asociativo acumulando AND
+    // Cond' -> AND Atom Cond' | e
+    // 'left' accumulates the subtree built so far.
+    // Each AND extends it: And(left, next_atom), then recurse.
+    // Result is a left-associative AND tree without left recursion.
     NodePtr parseCondPrime(NodePtr left) {
         if (cur().type == TokenType::AND) {
-            consume();  // consume AND
+            consume();                           // consume AND
             NodePtr right = parseAtom();
-            // Combinar en nodo AND y continuar
+            // Build And(left, right) and continue — left-associative
             return parseCondPrime(make_shared<AndNode>(left, right));
         }
-        // ε: SIGUIENTE(Cond') = {then} → no consumir nada
+        // e: lookahead in FOLLOW(Cond') = {then} — do not consume
         return left;
     }
 
-    // Atom  → id Atom'
-    // Atom' → RelOp value | ε
+    // Atom -> id Atom'     Atom' -> RelOp value | e
+    // One lookahead after reading 'id' decides which Atom' alternative:
+    //   {>, <, =} -> CmpNode (comparison condition)
+    //   {AND, then} -> FactNode (active-fact check, Atom' -> e)
     NodePtr parseAtom() {
         string id = expect(TokenType::ID).lexeme;
 
-        // Lookahead: ¿viene un operador relacional?
-        // PRIMERO(RelOp) = {>, <, =}
         TokenType next = cur().type;
         if (next == TokenType::GT || next == TokenType::LT || next == TokenType::EQ) {
             string op  = consume().lexeme;
@@ -328,122 +357,160 @@ class Parser {
             return make_shared<CmpNode>(id, op, val);
         }
 
-        // Atom' → ε: es un hecho activo
-        // SIGUIENTE(Atom') = {AND, then} → correcto no consumir
+        // No relational operator -> bare identifier = fact check
         return make_shared<FactNode>(id);
     }
 
 public:
     explicit Parser(vector<Token> t) : toks(move(t)) {}
-
     ProgramNode parse() { return parseProgram(); }
 };
 
 
 // ================================================================
-// MÓDULO 5: INTÉRPRETE — SEMÁNTICA DE PUNTO FIJO
+// MODULE 5 — INTERPRETER (FIXED-POINT SEMANTICS)
 //
-// El intérprete evalúa las reglas repetidamente hasta que no se
-// añaden nuevos hechos (convergencia al punto fijo).
+// Evaluates the program over an initial State until no new facts
+// can be derived — the fixed point S* of the operator f(S).
 //
-// Estado = { variables: map<string,int>, facts: set<string> }
+// State:
+//   vars  — immutable map: identifier -> integer value
+//   facts — monotonically growing set of active fact identifiers
+//           (only additions, never deletions, guarantees termination)
 //
-// Evaluación de condiciones:
-//   Cmp(x, op, v)  → verdadera si vars[x] op v
-//   Fact(x)        → verdadera si x ∈ facts
-//   And(c1, c2)    → verdadera si c1 ∧ c2
+// Condition semantics (recursive over AST node types):
+//   [[Cmp(x,op,v)]]_S  = vars(S)[x] op v
+//   [[Fact(x)]]_S      = x in facts(S)
+//   [[And(c1,c2)]]_S   = [[c1]]_S AND [[c2]]_S
+//
+// Fixed-point execution model:
+//   S0    = initial state
+//   Si+1  = Si U {a | rule(cond,a) in P  AND  [[cond]]_Si = true}
+//   S*    = Sn  when  Sn = Sn-1   (convergence: no new facts added)
 // ================================================================
 
 struct State {
-    map<string, int> vars;   // variables con valores enteros
-    set<string>      facts;  // hechos activos
+    map<string, int> vars;   // variable -> integer (fixed during execution)
+    set<string>      facts;  // active facts (grows monotonically)
 };
 
 class Interpreter {
 
-    // Evalúa recursivamente una condición sobre el estado dado
+    // Recursively evaluate a condition node against the current state.
+    // dynamic_cast identifies the concrete type because nodes are stored
+    // as base pointers (NodePtr = shared_ptr<ASTNode>).
     bool evalCond(NodePtr cond, const State& s) {
-        // Comparación aritmética
+
+        // ── Arithmetic comparison ────────────────────────────────
         if (auto* c = dynamic_cast<CmpNode*>(cond.get())) {
             auto it = s.vars.find(c->id);
-            if (it == s.vars.end()) return false;  // variable no definida
+            if (it == s.vars.end()) return false;  // undefined variable
             int v = it->second;
             if (c->op == ">") return v > c->value;
             if (c->op == "<") return v < c->value;
             if (c->op == "=") return v == c->value;
             return false;
         }
-        // Hecho activo
+
+        // ── Active fact check ────────────────────────────────────
+        // set::count returns 1 if the element is present, 0 if not
         if (auto* f = dynamic_cast<FactNode*>(cond.get()))
             return s.facts.count(f->id) > 0;
-        // Conjunción (evaluación en cortocircuito)
+
+        // ── Logical AND with short-circuit evaluation ────────────
+        // C++ guarantees right is not evaluated when left is false
         if (auto* a = dynamic_cast<AndNode*>(cond.get()))
             return evalCond(a->left, s) && evalCond(a->right, s);
-        return false;
+
+        return false;  // unreachable for a well-formed AST
     }
 
 public:
-    // Ejecuta el programa y devuelve los hechos NUEVOS activados
-    // (excluye los hechos que ya estaban en el estado inicial)
+    // Run the interpreter and return only facts activated DURING execution.
+    // Facts that were already in the initial state are excluded from output.
     set<string> run(const ProgramNode& prog, State state) {
-        set<string> initialFacts = state.facts;  // guardar estado inicial
 
+        // Snapshot the initial facts so we can subtract them at the end
+        set<string> initialFacts = state.facts;
+
+        // Fixed-point loop: repeat until no new fact is added in a full pass
         bool changed = true;
         while (changed) {
             changed = false;
             for (auto& rule : prog.rules) {
-                // Si la condición es verdadera y el hecho aún no está activo
+                // Apply rule only if condition holds AND action not yet active.
+                // Immediate insertion (not batched) is correct because the
+                // operator is monotone: the final fixed point is the same
+                // regardless of the order in which rules are processed.
                 if (evalCond(rule->cond, state) &&
                     !state.facts.count(rule->action)) {
                     state.facts.insert(rule->action);
-                    changed = true;  // nueva iteración necesaria
+                    changed = true;  // new fact added -> need another pass
                 }
             }
         }
 
-        // Retornar solo los hechos activados DURANTE la ejecución
+        // Return only the newly activated facts
         set<string> newFacts;
         for (auto& f : state.facts)
             if (!initialFacts.count(f))
-                newFacts.insert(f);
+                newFacts.insert(f);  // set<string> keeps alphabetical order
         return newFacts;
     }
 };
 
 
 // ================================================================
-// MÓDULO 6: ANÁLISIS ESTÁTICO
+// MODULE 6 — STATIC ANALYZER
 //
-// Detecta tres tipos de situaciones sobre la estructura del
-// programa, sin ejecutarlo:
+// Inspects the AST WITHOUT executing the program. Reports three
+// mutually-exclusive categories of issues:
 //
-//   1. CONFLICTO: dos o más reglas producen la misma acción
-//      → "Action <id> generated by r1, r2, ..."
+// 1. REDUNDANCY: rules sharing the same condition AND action.
+//    Conditions are normalized so (a AND b) == (b AND a).
+//    Output: "Redundant rules: r1, r2"
+//    NOTE: computed FIRST so redundant pairs are excluded from
+//    conflict detection (they are a sub-case, not a conflict).
 //
-//   2. REDUNDANCIA: dos reglas tienen condición Y acción idénticas
-//      → "Redundant rules: r1, r2"
+// 2. CONFLICT: two or more rules with DIFFERENT conditions produce
+//    the same action. Redundant groups are excluded.
+//    Output: "Action <id> generated by r1, r2, ..."
 //
-//   3. REGLA POTENCIALMENTE INACTIVA: la condición referencia
-//      identificadores que nunca serán accesibles dado el estado
-//      inicial y el conjunto de hechos derivables
-//      → "Potentially inactive rule: <id>"
+// 3. POTENTIALLY INACTIVE: a rule whose condition can never be
+//    satisfied given the initial state. Detection algorithm:
+//
+//    For CmpNode(x, op, v):
+//      - If no State: section was provided (hasState = false),
+//        we have no environment information, so x is treated as
+//        potentially reachable (conservative assumption).
+//      - If a State: section exists, x is reachable only if it
+//        appears in init.vars (variable must be declared).
+//        A variable that exists but whose value does not satisfy
+//        the condition is still considered reachable — value-aware
+//        analysis would introduce false positives in other cases.
+//    For FactNode(x):
+//      x is reachable if it is an initial fact or can be produced
+//      through the forward-propagation rule chain.
+//
+//    Output: "Potentially inactive rule: <id>"
 // ================================================================
 
 class StaticAnalyzer {
 
-    // Genera una clave canónica de una condición para comparación de igualdad.
-    // Los AND se normalizan ordenando sus partes para evitar falsos negativos
-    // por diferente asociatividad (a AND b vs b AND a).
+    // ── Canonical condition key ──────────────────────────────────
+    // Produces a deterministic string that captures the SEMANTICS of a
+    // condition. AND operands are sorted so (a AND b) and (b AND a)
+    // yield the same key — operand order has no semantic effect.
     string condKey(NodePtr c) {
         if (!c) return "";
         if (auto* cmp = dynamic_cast<CmpNode*>(c.get()))
             return cmp->id + cmp->op + to_string(cmp->value);
         if (auto* f = dynamic_cast<FactNode*>(c.get()))
-            return "~" + f->id;
+            return "~" + f->id;  // "~" prefix avoids collisions with comparisons
         if (dynamic_cast<AndNode*>(c.get())) {
             vector<string> parts;
             collectParts(c, parts);
-            sort(parts.begin(), parts.end());
+            sort(parts.begin(), parts.end());  // normalize AND operand order
             string key;
             for (auto& p : parts) key += p + "&";
             return key;
@@ -451,7 +518,7 @@ class StaticAnalyzer {
         return "";
     }
 
-    // Descompone un árbol AND en sus hojas individuales
+    // Flatten an AND subtree into its leaf-condition keys
     void collectParts(NodePtr c, vector<string>& parts) {
         if (auto* a = dynamic_cast<AndNode*>(c.get())) {
             collectParts(a->left,  parts);
@@ -461,48 +528,61 @@ class StaticAnalyzer {
         }
     }
 
-    // Recolecta todos los identificadores referenciados en una condición
-    void collectIds(NodePtr c, set<string>& ids) {
-        if (auto* cmp = dynamic_cast<CmpNode*>(c.get()))
-            ids.insert(cmp->id);
-        else if (auto* f = dynamic_cast<FactNode*>(c.get()))
-            ids.insert(f->id);
-        else if (auto* a = dynamic_cast<AndNode*>(c.get())) {
-            collectIds(a->left,  ids);
-            collectIds(a->right, ids);
+    // ── Reachability for a single condition node ─────────────────
+    // Returns true if this condition node CAN be satisfied given:
+    //   init       — the initial state
+    //   activatable— facts that can be reached through the rule chain
+    //   hasState   — whether a State: section was present in the input
+    bool nodeReachable(NodePtr c,
+                       const State& init,
+                       const set<string>& activatable,
+                       bool hasState) {
+
+        if (auto* cmp = dynamic_cast<CmpNode*>(c.get())) {
+            // With no state at all, we have no information about the
+            // environment -> conservatively assume the variable is present
+            if (!hasState) return true;
+            // State is present: variable must be declared in it.
+            // We do NOT check the actual value here because variables are
+            // immutable, but a rule with a "wrong" value could still be
+            // valid in a different run with a different state.
+            return init.vars.count(cmp->id) > 0;
         }
+
+        if (auto* f = dynamic_cast<FactNode*>(c.get()))
+            // Fact is reachable only if the forward-propagation can produce it
+            return activatable.count(f->id) > 0;
+
+        if (auto* a = dynamic_cast<AndNode*>(c.get()))
+            return nodeReachable(a->left,  init, activatable, hasState) &&
+                   nodeReachable(a->right, init, activatable, hasState);
+
+        return false;
     }
 
 public:
-    void analyze(const ProgramNode& prog, const State& init) {
+    // 'hasState' must be true when the input contained a State: section.
+    // It controls how undefined comparison variables are treated.
+    void analyze(const ProgramNode& prog,
+                 const State& init,
+                 bool hasState) {
 
-        // ── 1. CONFLICTOS ────────────────────────────────────────────
-        // Agrupar reglas por acción; si una acción tiene >1 regla → conflicto
-        map<string, vector<string>> actionToRules;
-        for (auto& r : prog.rules)
-            actionToRules[r->action].push_back(r->name);
-
-        for (auto& [action, rules] : actionToRules) {
-            if (rules.size() > 1) {
-                cout << "Action " << action << " generated by ";
-                for (size_t i = 0; i < rules.size(); ++i) {
-                    if (i) cout << ", ";
-                    cout << rules[i];
-                }
-                cout << "\n";
-            }
-        }
-
-        // ── 2. REDUNDANCIAS ──────────────────────────────────────────
-        // Dos reglas son redundantes si tienen la misma (condición, acción)
+        // ── Step 1: Redundancy (computed before conflict) ─────────
+        // Build a map from canonical signature to the list of rules
+        // that share it. Groups with more than one rule are redundant.
         map<string, vector<string>> sigToRules;
         for (auto& r : prog.rules) {
             string sig = condKey(r->cond) + "=>" + r->action;
             sigToRules[sig].push_back(r->name);
         }
 
+        // Track rule names in redundancy groups to exclude them from
+        // conflict detection (redundancy and conflict are mutually exclusive)
+        set<string> redundantNames;
         for (auto& [sig, rules] : sigToRules) {
             if (rules.size() > 1) {
+                for (auto& name : rules)
+                    redundantNames.insert(name);  // mark all in this group
                 cout << "Redundant rules: ";
                 for (size_t i = 0; i < rules.size(); ++i) {
                     if (i) cout << ", ";
@@ -512,57 +592,70 @@ public:
             }
         }
 
-        // ── 3. REGLAS POTENCIALMENTE INACTIVAS ───────────────────────
-        // Calculamos el conjunto de identificadores "alcanzables":
-        // empezamos con las variables y hechos del estado inicial,
-        // y propagamos hacia adelante las acciones de reglas cuyas
-        // condiciones son satisfacibles con los identificadores alcanzables.
-        set<string> reachable;
-        for (auto& [k, _] : init.vars)  reachable.insert(k);
-        for (auto& f       : init.facts) reachable.insert(f);
+        // ── Step 2: Conflict detection ────────────────────────────
+        // A conflict is two or more rules with DIFFERENT conditions
+        // producing the same action. Fully redundant groups (all rules
+        // share the same condition) are excluded from this check.
+        map<string, vector<string>> actionToRules;
+        for (auto& r : prog.rules)
+            actionToRules[r->action].push_back(r->name);
+
+        for (auto& [action, rules] : actionToRules) {
+            if (rules.size() > 1) {
+                // Skip the group if ALL of its rules are already in
+                // a redundancy group — they share the same condition
+                bool allRedundant = true;
+                for (auto& name : rules)
+                    if (!redundantNames.count(name)) { allRedundant = false; break; }
+
+                if (!allRedundant) {
+                    cout << "Action " << action << " generated by ";
+                    for (size_t i = 0; i < rules.size(); ++i) {
+                        if (i) cout << ", ";
+                        cout << rules[i];
+                    }
+                    cout << "\n";
+                }
+            }
+        }
+
+        // ── Step 3: Potentially inactive rules ───────────────────
+        // Forward propagation: compute which facts CAN be activated,
+        // starting from init.facts and applying rules whose conditions
+        // are reachable under nodeReachable().
+        set<string> activatable = init.facts;
 
         bool changed = true;
         while (changed) {
             changed = false;
             for (auto& r : prog.rules) {
-                // ¿Todos los ids de la condición son alcanzables?
-                set<string> needed;
-                collectIds(r->cond, needed);
-                bool allOk = true;
-                for (auto& id : needed)
-                    if (!reachable.count(id)) { allOk = false; break; }
-                // Si sí, la acción también es alcanzable
-                if (allOk && !reachable.count(r->action)) {
-                    reachable.insert(r->action);
+                if (nodeReachable(r->cond, init, activatable, hasState) &&
+                    !activatable.count(r->action)) {
+                    activatable.insert(r->action);
                     changed = true;
                 }
             }
         }
 
-        // Una regla es potencialmente inactiva si algún id de su
-        // condición nunca es alcanzable
+        // A rule is potentially inactive if its condition is not
+        // reachable even after full forward propagation
         for (auto& r : prog.rules) {
-            set<string> needed;
-            collectIds(r->cond, needed);
-            for (auto& id : needed) {
-                if (!reachable.count(id)) {
-                    cout << "Potentially inactive rule: " << r->name << "\n";
-                    break;
-                }
-            }
+            if (!nodeReachable(r->cond, init, activatable, hasState))
+                cout << "Potentially inactive rule: " << r->name << "\n";
         }
     }
 };
 
 
 // ================================================================
-// MÓDULO 7: PARSER DEL ESTADO INICIAL
+// MODULE 7 — INITIAL STATE PARSER
 //
-// El estado inicial tiene dos formatos posibles por línea:
-//   id = integer  → asignación de variable
-//   id            → hecho activo
+// Parses the "State:" section as plain text.
+// Each non-empty line is one of:
+//   id = integer  ->  variable assignment stored in State::vars
+//   id            ->  active fact stored in State::facts
 //
-// Se lee como texto plano sin pasar por el lexer principal.
+// Leading/trailing whitespace is trimmed; Windows \r\n is handled.
 // ================================================================
 
 State parseInitialState(const string& section) {
@@ -571,97 +664,100 @@ State parseInitialState(const string& section) {
     string line;
 
     while (getline(ss, line)) {
-        // Eliminar espacios al inicio y al final
+        // Trim leading whitespace
         auto start = line.find_first_not_of(" \t\r");
         if (start == string::npos) continue;
         line = line.substr(start);
+        // Trim trailing whitespace (handles Windows \r in \r\n endings)
         auto end = line.find_last_not_of(" \t\r");
         if (end != string::npos) line = line.substr(0, end + 1);
         if (line.empty()) continue;
 
-        // ¿Contiene '='? → asignación de variable
         auto eq = line.find('=');
         if (eq != string::npos) {
-            // Extraer id (antes del '=')
-            auto idEnd = line.find_last_not_of(" \t", eq - 1);
-            string id  = (idEnd != string::npos) ? line.substr(0, idEnd + 1) : "";
-
-            // Extraer valor (después del '=')
-            auto valStart = line.find_first_not_of(" \t", eq + 1);
-            string valStr = (valStart != string::npos) ? line.substr(valStart) : "";
+            // ── Variable assignment: extract id and value ─────────
+            auto   idEnd  = line.find_last_not_of(" \t", eq - 1);
+            string id     = (idEnd  != string::npos) ? line.substr(0, idEnd + 1) : "";
+            auto   vStart = line.find_first_not_of(" \t", eq + 1);
+            string valStr = (vStart != string::npos) ? line.substr(vStart) : "";
 
             if (!id.empty() && !valStr.empty()) {
+                // stoi throws on non-numeric input; silently skip malformed lines
                 try { s.vars[id] = stoi(valStr); }
-                catch (...) { /* ignorar líneas malformadas */ }
+                catch (...) {}
             }
         } else {
-            // Solo un identificador → hecho activo
+            // ── Active fact: bare identifier (no '=') ────────────
             s.facts.insert(line);
         }
     }
-
     return s;
 }
 
 
 // ================================================================
-// MÓDULO 8: PUNTO DE ENTRADA PRINCIPAL
+// MODULE 8 — ENTRY POINT (MAIN)
 //
-// Flujo:
-//   1. Leer entrada (archivo o stdin)
-//   2. Separar sección de reglas y sección de estado en "State:"
-//   3. Análisis léxico → tokens
-//   4. Análisis sintáctico → AST
-//   5. Parsear estado inicial
-//   6. Ejecutar intérprete → hechos activados
-//   7. Imprimir resultados
-//   8. Ejecutar análisis estático
+// Orchestrates the full pipeline:
+//   1. Read source from file argument or stdin
+//   2. Split on "State:" -> rules section + state section
+//   3. Tokenize rules section                    (Module 2)
+//   4. Parse token stream into AST               (Module 4)
+//   5. Parse initial state                       (Module 7)
+//   6. Run interpreter -> activated facts        (Module 5)
+//   7. Print execution output to stdout          (spec-compliant)
+//   8. Run static analyzer -> analysis messages  (Module 6)
+//
+// All errors are written to stderr so stdout stays clean.
 // ================================================================
 
 int main(int argc, char* argv[]) {
-    // ── Leer entrada ─────────────────────────────────────────────
+
+    // ── Read source from file or stdin ────────────────────────────
     string input;
     if (argc > 1) {
         ifstream file(argv[1]);
         if (!file) {
-            cerr << "Error: no se puede abrir el archivo '" << argv[1] << "'\n";
+            cerr << "Error: cannot open file '" << argv[1] << "'\n";
             return 1;
         }
+        // Read entire file in one operation using iterator assignment
         input.assign(istreambuf_iterator<char>(file), {});
     } else {
         input.assign(istreambuf_iterator<char>(cin), {});
     }
 
-    // ── Separar sección de reglas y estado ───────────────────────
-    // El separador es la línea "State:"
+    // ── Split on "State:" separator ──────────────────────────────
     const string SEPARATOR = "State:";
     auto sepPos = input.find(SEPARATOR);
 
-    string rulesText = (sepPos != string::npos)
-                       ? input.substr(0, sepPos)
-                       : input;
-    string stateText = (sepPos != string::npos)
-                       ? input.substr(sepPos + SEPARATOR.size())
-                       : "";
+    // 'hasState' is passed to the static analyzer to control how
+    // missing comparison variables are treated (see Module 6)
+    bool   hasState  = (sepPos != string::npos);
+    string rulesText = hasState ? input.substr(0, sepPos) : input;
+    string stateText = hasState ? input.substr(sepPos + SEPARATOR.size()) : "";
 
     try {
-        // ── 1. Análisis léxico ────────────────────────────────────
+        // ── Phase 1: Lexical analysis ─────────────────────────────
         Lexer lexer(rulesText);
         auto tokens = lexer.tokenize();
 
-        // ── 2. Análisis sintáctico + AST ──────────────────────────
+        // ── Phase 2: Syntactic analysis + AST construction ───────
+        // move() transfers token vector ownership into the parser,
+        // avoiding an unnecessary copy of potentially many tokens
         Parser parser(move(tokens));
         ProgramNode program = parser.parse();
 
-        // ── 3. Estado inicial ─────────────────────────────────────
+        // ── Phase 3: Load initial state ───────────────────────────
         State initialState = parseInitialState(stateText);
 
-        // ── 4. Ejecución (intérprete) ─────────────────────────────
+        // ── Phase 4: Fixed-point execution ───────────────────────
         Interpreter interp;
         set<string> activated = interp.run(program, initialState);
 
-        // ── 5. Imprimir hechos activados ──────────────────────────
-        // Los hechos ya vienen en orden alfabético (set<string>)
+        // ── Phase 5: Print execution output ──────────────────────
+        // set<string> iterates in ascending lexicographic order,
+        // satisfying the spec requirement for alphabetical output
         if (activated.empty()) {
             cout << "(no output)\n";
         } else {
@@ -669,11 +765,14 @@ int main(int argc, char* argv[]) {
                 cout << f << "\n";
         }
 
-        // ── 6. Análisis estático ──────────────────────────────────
+        // ── Phase 6: Static analysis ──────────────────────────────
+        // Printed AFTER the execution output, as required by the spec
         StaticAnalyzer analyzer;
-        analyzer.analyze(program, initialState);
+        analyzer.analyze(program, initialState, hasState);
 
     } catch (const exception& e) {
+        // Lexical and syntactic errors surface as runtime_error.
+        // Written to stderr so stdout remains clean.
         cerr << "Error: " << e.what() << "\n";
         return 1;
     }
