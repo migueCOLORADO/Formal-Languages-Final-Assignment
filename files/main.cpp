@@ -13,9 +13,8 @@
 //    Atom     -> id Atom'
 //    Atom'    -> RelOp value | e         (FOLLOW = {AND, then})
 //    RelOp    -> > | < | =
-//
-//  Usage: ./disasterguard <file.txt>   or   ./disasterguard (stdin)
-// ================================================================
+//// By | Miguel Angel Colorado Castano | Sebastian Ibarra Prada | Juan Diego Munoz Buitrago
+// Professor | Cesar Guerra Villa
 
 #include <iostream>
 #include <fstream>
@@ -435,7 +434,7 @@ int main(int argc, char* argv[]) {
         Interpreter interp;
         set<string> activated = interp.run(program, state);
 
-        if (activated.empty()) cout << "(no output)\n";
+        if (activated.empty() && hasState) cout << "(no output)\n";
         else for (auto& f : activated) cout << f << "\n";
 
         StaticAnalyzer().analyze(program, state, hasState);

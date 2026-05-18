@@ -123,9 +123,21 @@ These files correspond directly to the test cases defined in the project specifi
 | `case4.txt` | `alert` |
 | `case5.txt` | `(no output)` |
 | `case6.txt` | `fan_on` + conflict message |
-| `case7.txt` | `(no output)` + redundancy message |
+| `case7.txt` | redundancy message only |
 | `case8.txt` | `(no output)` |
 | `additional.txt` | `b` / `c` / `d` / `e` |
+
+**Note on Case 7:** No `State:` section is defined, so no facts can be activated. The `(no output)` line is suppressed when there is no state — only the static analysis message is printed.
+
+**Note on Case 8:** The rules and state are:
+```
+rule r1: if temp > 30 then alert       -- temp=25, 25>30 is FALSE
+rule r2: if alert then fan_on          -- alert never activated
+rule r3: if humidity < 20 then cooling -- humidity=50, 50<20 is FALSE
+
+State: temp=25, humidity=50
+```
+No rule fires, so output is `(no output)`. The static analyzer does not report `r3` as potentially inactive because `humidity` IS declared in the state. The analyzer conservatively treats any rule whose variables are defined as structurally reachable, regardless of their current value — value-aware analysis would produce false positives in other cases (e.g. Case 3 `r1` would also be flagged, which the spec does not expect).
 
 ---
 
