@@ -1,5 +1,5 @@
-// ================================================================
-//  DisasterGuard — Natural Disaster Detection Rule-Based Language
+
+//  Formal SIATA DisasterGuard — Natural Disaster Detection Rule-Based Language
 //
 //  Full compiler pipeline: Lexer -> LL(1) Parser -> AST ->
 //  Fixed-point Interpreter -> Static Analyzer
